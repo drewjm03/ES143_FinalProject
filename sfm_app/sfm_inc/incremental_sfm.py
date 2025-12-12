@@ -14,7 +14,7 @@ from sfm_app.geometry.essential import compute_essential_matrix, extract_RT_esse
 from sfm_app.geometry.fundamental import constrain_F, fundamental_matrix_ransac
 from sfm_app.geometry.pnp import estimate_camera_pose_pnp
 from sfm_app.geometry.triangulation import triangulate_matched_key_pts_to_3D_pts
-from sfm_app.sfm.data_structures import Camera, Observation, Point3D, SceneGraph
+from sfm_app.sfm_inc.data_structures import Camera, Observation, Point3D, SceneGraph
 
 
 def build_base_scene_from_two_frames(

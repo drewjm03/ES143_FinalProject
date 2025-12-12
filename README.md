@@ -1,0 +1,191 @@
+## sfm_app – Structure-from-Motion from Video
+
+**sfm_app** is a small Python package that builds a sparse 3D reconstruction from:
+
+- **Calibration-board video** (AprilBoard) to estimate camera intrinsics.
+- **Scene video** shot with the **same intrinsics**.
+
+The pipeline runs **incremental SfM** followed by **global bundle adjustment**, and exposes:
+
+- A Python API (`sfm_app.*` modules).
+- A CLI entrypoint `sfm-from-video`.
+
+
+### Pipeline Stages (High Level)
+
+- **Calibration** (`sfm_app.calib.aprilboard_calib`):
+  - Download AprilBoard definitions.
+  - Detect AprilBoard corners in calibration frames.
+  - Run `cv2.calibrateCamera` to obtain intrinsics `K` and distortion coefficients.
+
+- **Features & Geometry** (`sfm_app.features`, `sfm_app.geometry`):
+  - Detect keypoints and descriptors (SIFT/ORB).
+  - Match features between frames.
+  - Estimate fundamental and essential matrices.
+  - Recover relative camera pose and triangulate 3D points.
+
+- **Incremental SfM** (`sfm_app.sfm.incremental_sfm`):
+  - Build a base scene from two keyframes.
+  - Add more cameras using PnP + new triangulation.
+
+- **Bundle Adjustment** (`sfm_app.ba.bundle_adjustment`):
+  - Pack all camera extrinsics and 3D points into a parameter vector.
+  - Optimize reprojection error with `scipy.optimize.least_squares`.
+
+- **Visualization** (`sfm_app.viz.plotly_viz`):
+  - Plot cameras and 3D points in an interactive Plotly 3D figure.
+
+---
+
+### How to Run with Your Own Videos
+
+1. **Prepare your calibration video**:
+   - Record a video of an AprilBoard (coarse or fine) from multiple viewpoints.
+   - Make sure the board is clearly visible in most frames.
+   - Save as `.mp4` or another format supported by OpenCV.
+
+2. **Prepare your scene video**:
+   - Record a video of the scene you want to reconstruct using the same camera.
+   - Ensure the scene has good texture (distinctive features).
+   - Move the camera smoothly to provide good baselines between frames.
+
+3. **Create and activate a virtual environment (recommended)**:
+   From the project root (`es143_SFM`), create a venv named `sfm` and activate it:
+   ```bash
+   # Create venv named "sfm"
+   python -m venv sfm
+
+   # Activate it (PowerShell / cmd on Windows)
+   .\sfm\Scripts\activate
+   ```
+
+4. **Install the package into that venv**:
+   ```bash
+   pip install -e .
+   ```
+
+5. **Run the pipeline**:
+   ```bash
+   sfm-from-video ^
+     --calib-video your_calib_video.mp4 ^
+     --scene-video your_scene_video.mp4 ^
+     --board-type coarse ^
+     --output-dir output\ ^
+     --max-keyframes 40 ^
+     --visualize
+   ```
+
+6. **Check outputs**:
+   - `output\calibration.npz`: Camera intrinsics and distortion coefficients.
+   - `output\scene.npz`: Reconstructed scene (cameras, 3D points, observations).
+   - `output\reconstruction.html`: Interactive 3D visualization (if `--visualize` is used).
+
+
+---
+
+### CLI Usage and Flags
+
+After installing the package (e.g., `pip install -e .` from the repo root), you can run:
+
+```bash
+sfm-from-video ^
+  --calib-video path\to\calib.mp4 ^
+  --scene-video path\to\scene.mp4 ^
+  --board-type coarse ^
+  --output-dir out\ ^
+  --max-keyframes 40 ^
+  --visualize
+```
+
+This will:
+
+1. **Calibrate** intrinsics from the calibration video (unless `--skip-calibration` is used).
+2. **Extract and undistort frames** from the scene video.
+3. **Select keyframes** (up to `--max-keyframes`).
+4. **Run incremental SfM** to estimate camera poses and 3D points.
+5. **Optionally run bundle adjustment** (skipped if `--skip-ba` is passed).
+6. **Save outputs** to `out\` (e.g., `.npz` scene file and optional Plotly HTML visualization).
+
+#### CLI Flags (summary)
+
+- `--calib-video PATH` (**required**)  
+  Path to the calibration video (can be a dummy file if you use `--skip-calibration` with an existing `calibration.npz`).
+
+- `--scene-video PATH` (**required**)  
+  Path to the scene video you want to reconstruct.
+
+- `--board-type {coarse,fine}`  
+  AprilBoard type used for calibration. Must match the physical board you recorded.
+
+- `--output-dir PATH`  
+  Directory where `calibration.npz`, `scene.npz`, and `reconstruction.html` are written. Created if it doesn’t exist.
+
+- `--max-keyframes N`  
+  Maximum number of keyframes selected (uniformly) from the undistorted frames. Higher values give denser camera coverage but increase runtime.
+
+- `--skip-calibration`  
+  Skip running AprilBoard-based calibration and instead **load** `calibration.npz` from `--output-dir`. Use this when you already have intrinsics.
+
+- `--skip-ba`  
+  Skip global bundle adjustment and keep the raw incremental SfM result. Useful for debugging geometry issues or when BA is too slow.
+
+- `--visualize`  
+  Generate an interactive Plotly HTML visualization of the reconstruction (`reconstruction.html` in the output directory).
+
+---
+
+### Data Layout and Git Tracking
+
+- Place your videos under the `data` directory:
+  - `data\calib_vids\` – calibration videos (e.g., `BoardCalibration.MOV`).
+  - `data\test_vids\` – scene/test videos (e.g., `Library.MOV`).
+- These video files are **intentionally ignored by Git** via `.gitignore` to keep the repository small; you should copy your own videos into these folders locally.
+- The code and example scripts (including the CLI and `debug_features.py`) assume this layout by default.
+
+### Notes and Limitations
+
+- Assumes a **pinhole camera model** and static scenes with sufficient texture.
+- Assumes **no rolling-shutter correction**.
+- Requires decent baseline between frames for reliable triangulation.
+- The pipeline works best with well-textured scenes and sufficient camera motion.
+
+### `debug_features.py` – Inspecting Features and Matches
+
+- The helper script `debug_features.py` lets you **visualize keypoint detection and matching** between two keyframes of a scene video.
+- Typical usage (from the repo root, inside your venv):
+
+  ```bash
+  python debug_features.py --scene-video data/test_vids/Library.MOV --output debug_matches.png
+  ```
+
+- It will:
+  - Extract frames from the scene video (same sampling as the main CLI).
+  - Pick two frames around the base-pair timestamps (≈26s and 27s).
+  - Detect SIFT keypoints and descriptors.
+  - Match with FLANN + Lowe’s ratio test and run F-RANSAC.
+  - Draw only **inlier matches** and save them to the requested output image.
+
+Use this when you want to quickly see if your scene video has enough good features/matches before running the full SfM pipeline.
+
+### `tests.py` – Quick System Sanity Check
+
+- The `tests.py` script is a **fast, console-only health check** for the SfM package.
+- Run it from the repo root (inside your virtualenv):
+
+  ```bash
+  python tests.py
+  ```
+
+- It runs several groups of checks:
+  - **Imports**: verifies all core modules and symbols can be imported (`sfm_app.sfm`, `sfm_app.io`, `sfm_app.features`, `sfm_app.geometry`, `sfm_app.ba`, `sfm_app.viz`, and `pupil_apriltags.Detector`).
+  - **AprilBoard loading**: downloads/loads coarse and fine AprilBoards and prints some of their attributes.
+  - **Detector**: instantiates a `pupil_apriltags.Detector` to confirm the library is installed and usable.
+  - **Data structures**: constructs a small `SceneGraph` with a camera, a 3D point, and an observation.
+  - **Calibration I/O**: saves/loads a temporary `calibration.npz` via `save_calibration` / `load_calibration` and checks they match.
+
+- At the end it prints a **TEST SUMMARY** and exits with code `0` on success or `1` if anything fails.  
+  Use this script right after installation to confirm that your environment, dependencies, and basic SfM wiring are all in good shape before you start working with real videos.
+
+See the docstrings in each module for more detailed usage information and extension points.
+
+

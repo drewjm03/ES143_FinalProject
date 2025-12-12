@@ -7,6 +7,8 @@ from __future__ import annotations
 from typing import List
 
 import numpy as np
+from typing import List, Optional, Tuple
+
 
 from sfm_app.features.keypoints import detect_keypoints
 from sfm_app.features.matching import filter_matches_ratio_test, match_keypoints

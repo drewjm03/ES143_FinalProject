@@ -63,29 +63,39 @@ def select_keyframes(
     """
     Select keyframe indices from a list of frames.
 
-    Uses uniform subsampling to select a subset of frames.
+    Improvement:
+    - Always include the first few adjacent frames (0, 1, 2)
+      because these are essential for stable initialization,
+      especially on low-parallax datasets like Dino.
 
-    Args:
-        frames: List of frame arrays.
-        max_num: Maximum number of keyframes to select.
-
-    Returns:
-        List of frame indices (integers) corresponding to selected keyframes.
+    - Uniformly sample the remaining frames if needed.
     """
-    if len(frames) <= max_num:
-        return list(range(len(frames)))
 
-    # Uniformly sample indices
-    indices = np.linspace(0, len(frames) - 1, max_num, dtype=int)
-    # Remove duplicates while preserving order
-    unique_indices = []
+    n = len(frames)
+    if n <= max_num:
+        return list(range(n))
+
+    # Always include adjacent initial frames
+    base = [0, 1, 2]  # guarantees strong overlap and stable SfM init
+
+    remaining_max = max_num - len(base)
+    if remaining_max <= 0:
+        return base[:max_num]
+
+    # Uniformly sample the rest (excluding the first 3 frames)
+    remaining_indices = np.linspace(
+        3, n - 1, remaining_max, dtype=int
+    ).tolist()  # <<< convert to Python list
+
+    # Combine and deduplicate
+    result = []
     seen = set()
-    for idx in indices:
+    for idx in base + remaining_indices:  # now list + list = concatenation
         if idx not in seen:
-            unique_indices.append(idx)
-            seen.add(idx)
+            seen.add(int(idx))  # ensure it's an int, not np.int64
+            result.append(int(idx))
 
-    return unique_indices
+    return result
 
 
 __all__ = ["extract_frames_from_video", "select_keyframes"]

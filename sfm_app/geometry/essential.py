@@ -41,22 +41,48 @@ def extract_RT_essential_matrix(
         pts2: Points in second image (N, 2).
 
     Returns:
-        Tuple of (R, t, mask) where:
-        - R: Rotation matrix (3x3) from first to second camera.
-        - t: Translation vector (3, 1) from first to second camera.
-        - mask: Inlier mask (N,) indicating which points are in front of both cameras.
+        (R, t, mask) where:
+        - R: 3x3 rotation from cam1 to cam2
+        - t: 3x1 translation from cam1 to cam2
+        - mask: boolean inlier mask (N,), here we simply treat all points
+                as inliers and let later filters (z>0, reproj error) do the pruning.
     """
     if len(pts1) == 0 or len(pts2) == 0:
         R = np.eye(3)
         t = np.zeros((3, 1))
-        mask = np.array([]).astype(np.uint8)
-        return R, t, mask
+        mask_bool = np.array([], dtype=bool)
+        return R, t, mask_bool
 
-    # Recover pose using OpenCV
-    _, R, t, mask = cv2.recoverPose(E, pts1, pts2, K)
+    # Ensure correct dtype/shape for OpenCV
+    pts1_cv = pts1.astype(np.float32).reshape(-1, 1, 2)
+    pts2_cv = pts2.astype(np.float32).reshape(-1, 1, 2)
 
-    # OpenCV returns mask as uint8 (0 or 255). Convert to boolean mask of shape (N,).
-    mask_bool = mask.ravel().astype(bool)
+    # Call recoverPose in a way that works whether it returns 3 or 4 values.
+    result = cv2.recoverPose(E, pts1_cv, pts2_cv, K)
+
+    if isinstance(result, tuple):
+        if len(result) == 4:
+            retval, R, t, _mask = result
+        elif len(result) == 3:
+            retval, R, t = result
+        else:
+            # Unexpected form; fall back to identity transform.
+            print("[WARN] recoverPose returned unexpected tuple length; using identity pose.")
+            R = np.eye(3)
+            t = np.zeros((3, 1))
+    else:
+        # Extremely weird case (non-tuple); fall back.
+        print("[WARN] recoverPose returned non-tuple; using identity pose.")
+        R = np.eye(3)
+        t = np.zeros((3, 1))
+
+    # IMPORTANT: we do NOT trust recoverPose's mask here.
+    # We treat all F-RANSAC inliers as pose inliers and let triangulation
+    # + reprojection-error filtering clean things up.
+    mask_bool = np.ones(len(pts1), dtype=bool)
+
+    print(f"[DEBUG] recoverPose called on {len(pts1)} points; "
+          f"t norm = {np.linalg.norm(t):.4f}")
 
     return R, t, mask_bool
 

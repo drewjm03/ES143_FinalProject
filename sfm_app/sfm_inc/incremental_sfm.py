@@ -14,7 +14,7 @@ from sfm_app.geometry.essential import compute_essential_matrix, extract_RT_esse
 from sfm_app.geometry.fundamental import constrain_F, fundamental_matrix_ransac
 from sfm_app.geometry.pnp import estimate_camera_pose_pnp
 from sfm_app.geometry.triangulation import triangulate_matched_key_pts_to_3D_pts
-from sfm_app.sfm_inc.data_structures import Camera, Observation, Point3D, SceneGraph
+from sfm_app.sfm.data_structures import Camera, Observation, Point3D, SceneGraph
 
 
 def build_base_scene_from_two_frames(
@@ -597,42 +597,102 @@ def run_sfm_from_frames(
     """
     if len(keyframe_indices) < 2:
         return SceneGraph()
+    # Always use the earliest keyframe as the first base frame (e.g., 0)
+    i0 = keyframe_indices[0]
 
-    # Pick specific frames corresponding (approximately) to 26s and 27s
-    # in the original video, based on the debug extraction you ran:
-    #
-    #   FPS ≈ 59.97, stride every_n = 5  -> extracted frame indices:
-    #     t=26s -> frame_idx ≈ 1559
-    #     t=27s -> frame_idx ≈ 1619
-    #
-    # Mapping raw frame indices to indices in the subsampled `frames` list:
-    #   subsampled_index ≈ round(frame_idx / every_n)
-    #   -> i0 ≈ round(1559 / 5) ≈ 312
-    #   -> i1 ≈ round(1619 / 5) ≈ 324
-    #
-    # We clamp to the valid range of the frames list.
-    approx_i0 = int(round(1559 / 5))
-    approx_i1 = int(round(1619 / 5))
-    n_frames = len(frames)
-    i0 = max(0, min(n_frames - 1, approx_i0))
-    i1 = max(0, min(n_frames - 1, approx_i1))
+    # ------------------------------------------------------------
+    # Helper to count 3D points in a SceneGraph robustly
+    # ------------------------------------------------------------
+    def count_points(scene: SceneGraph) -> int:
+        if hasattr(scene, "points3d") and scene.points3d is not None:
+            return len(scene.points3d)
+        if hasattr(scene, "points") and scene.points is not None:
+            return len(scene.points)
+        return 0
 
-    print(f"[sfm] Using fixed base keyframes {i0} and {i1} for initial reconstruction")
+    # ------------------------------------------------------------
+    # Candidate second keyframes: ALL remaining keyframes
+    # ------------------------------------------------------------
+    candidate_indices = keyframe_indices[1:]  # this preserves order: 1,2,3,...,N
 
-    # Build base scene from two frames
-    scene = build_base_scene_from_two_frames(frames, i0, i1, K)
+    print(
+        f"[sfm] Evaluating {len(candidate_indices)} candidate base pairs "
+        f"starting from frame {i0}..."
+    )
 
-    if len(scene.cameras) == 0:
-        return scene
+    best_scene: Optional[SceneGraph] = None
+    best_pair: Optional[Tuple[int, int]] = None
+    best_score: int = 0
 
-    # Add remaining keyframes incrementally
-    remaining_indices = [idx for idx in keyframe_indices if idx != i0 and idx != i1]
+    # Minimum number of 3D points we consider "usable" for a base scene
+    # (You can tweak or even set this to 0 if you want *some* base no matter what.)
+    min_points_for_base = 20
+
+    # ------------------------------------------------------------
+    # Try each candidate as the second base keyframe: (i0, i1)
+    # ------------------------------------------------------------
+    for i1 in candidate_indices:
+        print(f"[sfm] Trying base keyframes {i0} and {i1} for initial reconstruction...")
+        candidate_scene = build_base_scene_from_two_frames(frames, i0, i1, K)
+
+        # If base-building failed completely, skip
+        if not hasattr(candidate_scene, "cameras") or len(candidate_scene.cameras) < 2:
+            print(f"[sfm]   -> Rejected: < 2 cameras in base scene.")
+            continue
+
+        num_pts = count_points(candidate_scene)
+        print(
+            f"[sfm]   -> Candidate base scene: "
+            f"{len(candidate_scene.cameras)} cameras, {num_pts} 3D points"
+        )
+
+        # Skip very weak bases
+        if num_pts < min_points_for_base:
+            continue
+
+        # Keep the best one by number of 3D points
+        if num_pts > best_score:
+            best_score = num_pts
+            best_pair = (i0, i1)
+            best_scene = candidate_scene
+
+    # ------------------------------------------------------------
+    # Fallback if no strong candidate was found
+    # ------------------------------------------------------------
+    if best_scene is None:
+        # Fall back to the first two keyframes (i0, keyframe_indices[1])
+        fallback_i1 = keyframe_indices[1]
+        print(
+            "[sfm] WARNING: Could not find a strong base pair; "
+            f"falling back to first two keyframes ({i0}, {fallback_i1})."
+        )
+        fallback_scene = build_base_scene_from_two_frames(frames, i0, fallback_i1, K)
+
+        if not hasattr(fallback_scene, "cameras") or len(fallback_scene.cameras) < 2:
+            print("[sfm] ERROR: Base scene failed even with fallback pair.")
+            return fallback_scene
+
+        best_scene = fallback_scene
+        best_pair = (i0, fallback_i1)
+        best_score = count_points(best_scene)
+
+    i0, i1 = best_pair
+    print(
+        f"[sfm] Using base keyframes {i0} and {i1} for initial reconstruction "
+        f"(score = {best_score} 3D points)"
+    )
+
+    scene = best_scene
+
+    # ------------------------------------------------------------
+    # Incrementally add remaining keyframes
+    # ------------------------------------------------------------
+    remaining_indices = [idx for idx in keyframe_indices if idx not in (i0, i1)]
 
     for idx in remaining_indices:
         scene = add_camera_incremental(scene, K, frames[idx], idx)
 
     return scene
-
 
 __all__ = [
     "build_base_scene_from_two_frames",

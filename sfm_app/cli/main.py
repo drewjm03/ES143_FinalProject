@@ -15,7 +15,7 @@ from sfm_app.ba.bundle_adjustment import run_bundle_adjustment
 from sfm_app.calib.aprilboard_calib import calibrate_camera_from_aprilboard_video
 from sfm_app.io.calib_io import save_calibration, save_scene_npz
 from sfm_app.io.video_io import extract_frames_from_video, select_keyframes
-from sfm_app.sfm.incremental_sfm import run_sfm_from_frames
+from sfm_app.sfm_inc.incremental_sfm import run_sfm_from_frames
 from sfm_app.viz.plotly_viz import plot_sfm_reconstruct
 
 

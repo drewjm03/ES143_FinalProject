@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 from scipy.optimize import least_squares
 
-from sfm_app.sfm.data_structures import SceneGraph
+from sfm_app.sfm_inc.data_structures import SceneGraph
 
 
 def pack_parameters(

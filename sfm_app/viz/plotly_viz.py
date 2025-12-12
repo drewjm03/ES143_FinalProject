@@ -7,7 +7,7 @@ from __future__ import annotations
 import plotly.graph_objs as go
 import numpy as np
 
-from sfm_app.sfm.data_structures import SceneGraph
+from sfm_app.sfm_inc.data_structures import SceneGraph
 
 
 def plot_sfm_reconstruct(scene: SceneGraph) -> go.Figure:

@@ -631,8 +631,30 @@ def run_sfm_from_frames(
     #   - the first keyframe, and
     #   - the 5th keyframe if it exists, otherwise the last keyframe.
     i0 = keyframe_indices[0]
-    if len(keyframe_indices) >= 5:
-        i1 = keyframe_indices[4]
+
+    # ------------------------------------------------------------
+    # Helper to count 3D points in a SceneGraph robustly
+    # ------------------------------------------------------------
+    def count_points(scene: SceneGraph) -> int:
+        if hasattr(scene, "points3d") and scene.points3d is not None:
+            return len(scene.points3d)
+        if hasattr(scene, "points") and scene.points is not None:
+            return len(scene.points)
+        return 0
+
+    # ------------------------------------------------------------
+    # Candidate second keyframe: fixed offset from the first.
+    #
+    # We choose the base pair to be:
+    #   - the earliest keyframe (i0), and
+    #   - the keyframe that is 5 positions later in the keyframe list,
+    #     or the last keyframe if there are fewer than 6 total.
+    #
+    # This approximates "first frame and first + 5 frames" under the
+    # keyframe subsampling used by the CLI.
+    # ------------------------------------------------------------
+    if len(keyframe_indices) > 5:
+        candidate_indices = [keyframe_indices[5]]
     else:
         i1 = keyframe_indices[-1]
 

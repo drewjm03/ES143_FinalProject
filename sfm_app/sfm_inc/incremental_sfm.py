@@ -408,6 +408,39 @@ def add_camera_incremental(
         )
         return scene  # PnP pose not reliable enough
 
+    # ------------------------------------------------------------------
+    # Reject cameras whose centers are extreme outliers relative to the
+    # existing camera rig.
+    #
+    # Strategy:
+    #   - Compute centers of existing cameras C_i.
+    #   - Let median_cam_norm = median_i ||C_i||.
+    #   - Compute new center C_new and its norm ||C_new||.
+    #   - If ||C_new|| >> median_cam_norm (e.g. > 5x), reject this camera.
+    #
+    # This prevents runaway drift where later cameras "jump" far away
+    # from the main cluster of views and create massive, far-away 3D
+    # points that destabilize the reconstruction.
+    # ------------------------------------------------------------------
+    if len(scene.cameras) > 0:
+        Rs_exist = np.stack([cam.R for cam in scene.cameras])
+        ts_exist = np.stack([cam.t for cam in scene.cameras])
+        C_exist = -(Rs_exist.transpose(0, 2, 1) @ ts_exist).squeeze(-1)  # (N_cams, 3)
+        cam_norms = np.linalg.norm(C_exist, axis=1)
+        median_cam_norm = float(np.median(cam_norms)) if cam_norms.size > 0 else 0.0
+    else:
+        median_cam_norm = 0.0
+
+    C_new = -(R_new.T @ t_new).reshape(-1)
+    new_cam_norm = float(np.linalg.norm(C_new))
+
+    if median_cam_norm > 0.0 and new_cam_norm > 5.0 * median_cam_norm:
+        print(
+            f"[sfm] Rejecting new camera at image_idx={image_idx}: "
+            f"center norm {new_cam_norm:.2f} >> median {median_cam_norm:.2f}"
+        )
+        return scene
+
     # Create new camera
     new_camera_id = len(scene.cameras)
     new_kp_array = np.array([kp.pt for kp in best_kp_new], dtype=np.float32)

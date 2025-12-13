@@ -111,8 +111,8 @@ def main() -> None:
 
     # Step 2: Extract frames from scene video
     print(f"Extracting frames from {args.scene_video}...")
-    # Use a stride of 2 to keep more temporal resolution while still limiting frame count.
-    frames = extract_frames_from_video(args.scene_video, every_n=2, max_frames=500)
+    # Use a stride of 5 so that adjacent extracted frames are ~5 raw frames apart.
+    frames = extract_frames_from_video(args.scene_video, every_n=5, max_frames=500)
 
     if len(frames) == 0:
         print("Error: No frames extracted from scene video")

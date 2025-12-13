@@ -624,7 +624,7 @@ def run_sfm_from_frames(
     # keyframe subsampling used by the CLI.
     # ------------------------------------------------------------
     if len(keyframe_indices) > 5:
-        candidate_indices = [keyframe_indices[5]]
+        candidate_indices = [keyframe_indices[2]]
     else:
         candidate_indices = [keyframe_indices[1]]
 

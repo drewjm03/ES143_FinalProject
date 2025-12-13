@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sfm-app"
+version = "0.1.0"
+description = "Structure-from-Motion from calibration + scene video with bundle adjustment"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "plotly>=5.20.0",
+    "requests>=2.31.0",
+    # Latest published version on PyPI is 1.0.4.post11; require that or newer
+    # so pip can resolve correctly on Python 3.12.
+    "pupil-apriltags>=1.0.4.post11",
+]
+
+[project.scripts]
+sfm-from-video = "sfm_app.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sfm_app*"]
+
+

@@ -159,7 +159,7 @@ def main() -> None:
 
     # Step 6: Run bundle adjustment
     print("Running bundle adjustment...")
-    scene = run_bundle_adjustment(scene, K, max_nfev=100)
+    scene = run_bundle_adjustment(scene, K, max_nfev=15)
     print("Bundle adjustment completed")
 
     # Step 7: Save outputs

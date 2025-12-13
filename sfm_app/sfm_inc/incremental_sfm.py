@@ -613,9 +613,20 @@ def run_sfm_from_frames(
         return 0
 
     # ------------------------------------------------------------
-    # Candidate second keyframes: ALL remaining keyframes
+    # Candidate second keyframe: fixed offset from the first.
+    #
+    # We choose the base pair to be:
+    #   - the earliest keyframe (i0), and
+    #   - the keyframe that is 5 positions later in the keyframe list,
+    #     or the last keyframe if there are fewer than 6 total.
+    #
+    # This approximates "first frame and first + 5 frames" under the
+    # keyframe subsampling used by the CLI.
     # ------------------------------------------------------------
-    candidate_indices = keyframe_indices[1:]  # this preserves order: 1,2,3,...,N
+    if len(keyframe_indices) > 5:
+        candidate_indices = [keyframe_indices[5]]
+    else:
+        candidate_indices = [keyframe_indices[1]]
 
     print(
         f"[sfm] Evaluating {len(candidate_indices)} candidate base pairs "

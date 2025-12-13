@@ -189,28 +189,6 @@ def main() -> None:
     num_pts = len(scene.points3d)
     print(f"SfM reconstructed {num_cams} cameras and {num_pts} 3D points")
 
-    # Inspect camera centers before any optional bundle adjustment.
-    Rs = np.stack([cam.R for cam in scene.cameras])
-    ts = np.stack([cam.t for cam in scene.cameras])
-    C = -(Rs.transpose(0, 2, 1) @ ts).squeeze(-1)
-    norms = np.linalg.norm(C, axis=1)
-    print("[DEBUG] Pre-BA camera centers:\n", C)
-    print("[DEBUG] Pre-BA center norms:", norms)
-
-    # Per-camera observation / coverage summary.
-    print("[DEBUG] Per-camera coverage summary:")
-    for cam in scene.cameras:
-        # Collect all observations for this camera.
-        cam_obs = [obs for obs in scene.observations if obs.camera_id == cam.id]
-        n_obs = len(cam_obs)
-        unique_point_ids = {obs.point_id for obs in cam_obs}
-        n_unique_pts = len(unique_point_ids)
-        print(
-            f"  - Cam {cam.id} (image_idx={cam.image_idx}): "
-            f"{n_unique_pts} unique points, {n_obs} observations, "
-            f"center={C[cam.id]}, |C|={norms[cam.id]:.3f}"
-        )
-
     # Step 6: Run bundle adjustment (optional)
     if args.skip_ba:
         print("Skipping bundle adjustment (--skip-ba set)")
@@ -220,6 +198,75 @@ def main() -> None:
         # to keep runtime reasonable.
         scene = run_bundle_adjustment(scene, K, max_nfev=10)
         print("Bundle adjustment completed")
+
+    # ------------------------------------------------------------------
+    # Optional final 3D point filtering based on scene scale.
+    #
+    # Idea:
+    #   - Compute camera centers C_i.
+    #   - Let R_cam = max_i ||C_i|| (typical camera radius).
+    #   - Discard 3D points whose norm ||X|| is far beyond the camera scale,
+    #     e.g. ||X|| > 5 * R_cam.
+    #
+    # This removes extreme outliers that can dominate visualizations or
+    # downstream processing while keeping points at a reasonable distance
+    # from the camera rig.
+    # ------------------------------------------------------------------
+    if len(scene.cameras) > 0 and len(scene.points3d) > 0:
+        Rs = np.stack([cam.R for cam in scene.cameras])
+        ts = np.stack([cam.t for cam in scene.cameras])
+        C = -(Rs.transpose(0, 2, 1) @ ts).squeeze(-1)  # (N_cams, 3)
+        cam_norms = np.linalg.norm(C, axis=1)
+
+        max_cam_radius = float(np.max(cam_norms)) if cam_norms.size > 0 else 0.0
+
+        if max_cam_radius > 0.0:
+            pts_xyz = np.array([pt.xyz for pt in scene.points3d])
+            pt_norms = np.linalg.norm(pts_xyz, axis=1)
+
+            max_allowed_norm = 5.0 * max_cam_radius
+            keep_mask = pt_norms <= max_allowed_norm
+
+            if not np.all(keep_mask):
+                # Build mapping from old point IDs to new compact IDs.
+                old_to_new: dict[int, int] = {}
+                new_points = []
+
+                for keep, pt in zip(keep_mask, scene.points3d):
+                    if not keep:
+                        continue
+                    new_id = len(new_points)
+                    old_to_new[pt.id] = new_id
+                    pt.id = new_id
+                    new_points.append(pt)
+
+                # Filter observations and remap their point_ids.
+                new_observations = []
+                for obs in scene.observations:
+                    if obs.point_id in old_to_new:
+                        obs.point_id = old_to_new[obs.point_id]
+                        new_observations.append(obs)
+
+                # Update per-camera point_ids arrays if present.
+                for cam in scene.cameras:
+                    if cam.point_ids.size == 0:
+                        continue
+                    new_point_ids = -np.ones_like(cam.point_ids)
+                    for idx, pid in enumerate(cam.point_ids):
+                        if pid in old_to_new:
+                            new_point_ids[idx] = old_to_new[pid]
+                    cam.point_ids = new_point_ids
+
+                removed = int((~keep_mask).sum())
+                scene.points3d = new_points
+                scene.observations = new_observations
+
+                print(
+                    "[sfm] Filtered 3D points by norm: "
+                    f"removed {removed}, kept {len(scene.points3d)} "
+                    f"with ||X|| <= {max_allowed_norm:.3f} "
+                    f"(5x max camera radius {max_cam_radius:.3f})"
+                )
 
     # Step 7: Save outputs
     scene_path = output_dir / "scene.npz"

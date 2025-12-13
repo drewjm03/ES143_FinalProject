@@ -73,6 +73,30 @@ def main() -> None:
         action="store_true",
         help="Generate HTML visualization of the reconstruction",
     )
+    parser.add_argument(
+        "--baseframe1",
+        type=int,
+        default=None,
+        help=(
+            "Optional manual base frame index (in the extracted/undistorted frame list). "
+            "If both --baseframe1 and --baseframe2 are provided, they override the "
+            "default base keyframe selection."
+        ),
+    )
+    parser.add_argument(
+        "--baseframe2",
+        type=int,
+        default=None,
+        help=(
+            "Optional second manual base frame index (in the extracted/undistorted "
+            "frame list). Must be used together with --baseframe1 to take effect."
+        ),
+    )
+    parser.add_argument(
+        "--skip-ba",
+        action="store_true",
+        help="Skip global bundle adjustment (use raw triangulated poses/points)",
+    )
 
     args = parser.parse_args()
 
@@ -111,7 +135,6 @@ def main() -> None:
 
     # Step 2: Extract frames from scene video
     print(f"Extracting frames from {args.scene_video}...")
-    # Use a stride of 5 so that adjacent extracted frames are ~5 raw frames apart.
     frames = extract_frames_from_video(args.scene_video, every_n=5, max_frames=500)
 
     if len(frames) == 0:
@@ -150,18 +173,53 @@ def main() -> None:
 
     # Step 5: Run SfM
     print("Running incremental SfM...")
-    scene = run_sfm_from_frames(undistorted_frames, K, keyframe_indices)
+    scene = run_sfm_from_frames(
+        undistorted_frames,
+        K,
+        keyframe_indices,
+        baseframe1=args.baseframe1,
+        baseframe2=args.baseframe2,
+    )
 
     if len(scene.cameras) == 0 or len(scene.points3d) == 0:
         print("Error: SfM failed to reconstruct scene")
         return
 
-    print(f"SfM reconstructed {len(scene.cameras)} cameras and {len(scene.points3d)} 3D points")
+    num_cams = len(scene.cameras)
+    num_pts = len(scene.points3d)
+    print(f"SfM reconstructed {num_cams} cameras and {num_pts} 3D points")
 
-    # Step 6: Run bundle adjustment
-    print("Running bundle adjustment...")
-    scene = run_bundle_adjustment(scene, K, max_nfev=15)
-    print("Bundle adjustment completed")
+    # Inspect camera centers before any optional bundle adjustment.
+    Rs = np.stack([cam.R for cam in scene.cameras])
+    ts = np.stack([cam.t for cam in scene.cameras])
+    C = -(Rs.transpose(0, 2, 1) @ ts).squeeze(-1)
+    norms = np.linalg.norm(C, axis=1)
+    print("[DEBUG] Pre-BA camera centers:\n", C)
+    print("[DEBUG] Pre-BA center norms:", norms)
+
+    # Per-camera observation / coverage summary.
+    print("[DEBUG] Per-camera coverage summary:")
+    for cam in scene.cameras:
+        # Collect all observations for this camera.
+        cam_obs = [obs for obs in scene.observations if obs.camera_id == cam.id]
+        n_obs = len(cam_obs)
+        unique_point_ids = {obs.point_id for obs in cam_obs}
+        n_unique_pts = len(unique_point_ids)
+        print(
+            f"  - Cam {cam.id} (image_idx={cam.image_idx}): "
+            f"{n_unique_pts} unique points, {n_obs} observations, "
+            f"center={C[cam.id]}, |C|={norms[cam.id]:.3f}"
+        )
+
+    # Step 6: Run bundle adjustment (optional)
+    if args.skip_ba:
+        print("Skipping bundle adjustment (--skip-ba set)")
+    else:
+        print("Running bundle adjustment...")
+        # Run BA on a random subset of points with a small iteration limit
+        # to keep runtime reasonable.
+        scene = run_bundle_adjustment(scene, K, max_nfev=10)
+        print("Bundle adjustment completed")
 
     # Step 7: Save outputs
     scene_path = output_dir / "scene.npz"

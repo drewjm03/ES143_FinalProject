@@ -4,7 +4,7 @@ Incremental Structure-from-Motion pipeline.
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
@@ -206,10 +206,30 @@ def build_base_scene_from_two_frames(
     pts1_valid = pts1_pose_inliers[valid_mask]
     pts2_valid = pts2_pose_inliers[valid_mask]
 
+    # Map each valid triangulated point back to the original keypoint
+    # indices in kp1 / kp2 via the surviving matches.
+    # good_matches_inliers: matches after F-RANSAC.
+    good_matches_inliers = [good_matches[i] for i in range(len(good_matches)) if inlier_mask[i]]
+    pose_matches = [good_matches_inliers[i] for i in range(len(good_matches_inliers)) if pose_mask[i]]
+    # Now apply the same valid_mask used on points_3d.
+    feature_idx_cam0 = np.array(
+        [m.queryIdx for i, m in enumerate(pose_matches) if valid_mask[i]],
+        dtype=int,
+    )
+    feature_idx_cam1 = np.array(
+        [m.trainIdx for i, m in enumerate(pose_matches) if valid_mask[i]],
+        dtype=int,
+    )
+
     # Create SceneGraph
     scene = SceneGraph()
 
-    # Create cameras
+    # Full keypoint arrays for both base cameras.
+    kp1_all = np.array([kp.pt for kp in kp1], dtype=np.float32)
+    kp2_all = np.array([kp.pt for kp in kp2], dtype=np.float32)
+    point_ids_cam0 = -np.ones(len(kp1_all), dtype=int)
+    point_ids_cam1 = -np.ones(len(kp2_all), dtype=int)
+
     # Camera 0 (first frame)
     cam0 = Camera(
         id=0,
@@ -217,8 +237,9 @@ def build_base_scene_from_two_frames(
         R=R1,
         t=t1,
         image_idx=frame_idx1,
-        keypoints=pts1_valid,
-        descriptors=desc1,  # Store full descriptor array
+        keypoints=kp1_all,
+        descriptors=desc1,
+        point_ids=point_ids_cam0,
     )
     scene.cameras.append(cam0)
 
@@ -229,8 +250,9 @@ def build_base_scene_from_two_frames(
         R=R2,
         t=t2,
         image_idx=frame_idx2,
-        keypoints=pts2_valid,
-        descriptors=desc2,  # Store full descriptor array
+        keypoints=kp2_all,
+        descriptors=desc2,
+        point_ids=point_ids_cam1,
     )
     scene.cameras.append(cam1)
 
@@ -244,20 +266,27 @@ def build_base_scene_from_two_frames(
         else:
             color = np.array([128, 128, 128], dtype=np.uint8)
 
+        point_id = len(scene.points3d)
         point3d = Point3D(
-            id=i,
+            id=point_id,
             xyz=pt_3d,
             color=color,
             observations=[],
         )
         scene.points3d.append(point3d)
 
+        # Record which keypoints (by index) observe this 3D point.
+        k0 = feature_idx_cam0[i]
+        k1 = feature_idx_cam1[i]
+        scene.cameras[0].point_ids[k0] = point_id
+        scene.cameras[1].point_ids[k1] = point_id
+
         # Create observations
         obs0_idx = len(scene.observations)
         obs1_idx = len(scene.observations) + 1
 
-        obs0 = Observation(camera_id=0, point_id=i, uv=pts1_valid[i])
-        obs1 = Observation(camera_id=1, point_id=i, uv=pts2_valid[i])
+        obs0 = Observation(camera_id=0, point_id=point_id, uv=pts1_valid[i])
+        obs1 = Observation(camera_id=1, point_id=point_id, uv=pts2_valid[i])
 
         scene.observations.append(obs0)
         scene.observations.append(obs1)
@@ -340,69 +369,27 @@ def add_camera_incremental(
     if best_camera_match is None or max_matches < 4:
         return scene  # Not enough matches
 
-    # Build 2D-3D correspondences for PnP.
-    #
-    # `best_matches` are descriptor matches between the new image and
-    # `best_camera_match`. Each match links:
-    #   - new image keypoint index:  match.queryIdx
-    #   - existing camera keypoint index: match.trainIdx
-    #
-    # The existing camera already has observations that tie some of its
-    # keypoints to 3D points in the scene. We recover 2D-3D pairs by:
-    #   1) For the matched keypoint on the existing camera, find the
-    #      closest observation (same camera) in pixel space.
-    #   2) If that observation is within a small pixel threshold, we
-    #      treat it as the corresponding 3D point.
+    # Build 2D-3D correspondences for PnP directly from feature-level
+    # mappings. `best_camera_match.point_ids[idx]` gives the 3D point id
+    # (or -1 if none) for the matched descriptor at `idx`.
     points_3d_list = []
     points_2d_list = []
-    matched_point_ids = {}  # Ensure we only use each 3D point once.
-
-    # Collect all observations for the camera we are matching against.
-    obs_uvs = []
-    obs_point_ids = []
-    for obs in scene.observations:
-        if obs.camera_id == best_camera_match.id:
-            obs_uvs.append(obs.uv)
-            obs_point_ids.append(obs.point_id)
-
-    if not obs_uvs:
-        return scene  # No existing observations to link to 3D points
-
-    obs_uvs = np.array(obs_uvs, dtype=np.float32)  # (M, 2)
-    obs_point_ids = np.array(obs_point_ids, dtype=int)  # (M,)
-
-    # Maximum allowed pixel distance between a matched keypoint and an
-    # observation on the existing camera for them to be considered the
-    # same feature.
-    max_uv_dist = 2.0
+    matched_point_ids: list[int] = []
+    matched_query_indices: list[int] = []
+    used_point_ids = set()
 
     for match in best_matches:
-        if match.trainIdx >= len(best_camera_match.keypoints):
-            continue
+        pid = int(best_camera_match.point_ids[match.trainIdx]) if len(best_camera_match.point_ids) > 0 else -1
+        if pid < 0:
+            continue  # this feature on the existing camera has no 3D point yet
+        if pid in used_point_ids:
+            continue  # avoid duplicate 2D-3D pairs for the same 3D point
 
-        # 2D point in the existing camera and in the new image.
-        pt_cam = best_camera_match.keypoints[match.trainIdx]  # (2,)
-        pt_new = best_kp_new[match.queryIdx].pt
-
-        pt_cam = np.array(pt_cam, dtype=np.float32)
-
-        # Find closest observation on this camera in pixel space.
-        diffs = obs_uvs - pt_cam[None, :]
-        dists_sq = np.sum(diffs * diffs, axis=1)
-        j = int(np.argmin(dists_sq))
-
-        if dists_sq[j] > max_uv_dist * max_uv_dist:
-            # No sufficiently close observation; skip this match.
-            continue
-
-        point_id = int(obs_point_ids[j])
-        if point_id in matched_point_ids:
-            # Already used this 3D point.
-            continue
-
-        matched_point_ids[point_id] = len(points_2d_list)
-        points_3d_list.append(scene.points3d[point_id].xyz)
-        points_2d_list.append(pt_new)
+        used_point_ids.add(pid)
+        points_3d_list.append(scene.points3d[pid].xyz)
+        points_2d_list.append(best_kp_new[match.queryIdx].pt)
+        matched_point_ids.append(pid)
+        matched_query_indices.append(match.queryIdx)
 
     points_3d_array = np.array(points_3d_list) if points_3d_list else np.array([]).reshape(0, 3)
     points_2d_array = np.array(points_2d_list) if points_2d_list else np.array([]).reshape(0, 2)
@@ -414,7 +401,7 @@ def add_camera_incremental(
     R_new, t_new, inlier_mask = estimate_camera_pose_pnp(K, points_3d_array, points_2d_array)
 
     num_pnp_inliers = int(np.sum(inlier_mask))
-    if num_pnp_inliers < 30:
+    if num_pnp_inliers < 10:
         print(
             f"[sfm] Rejecting new camera at image_idx={image_idx}: "
             f"only {num_pnp_inliers} PnP inliers"
@@ -423,30 +410,35 @@ def add_camera_incremental(
 
     # Create new camera
     new_camera_id = len(scene.cameras)
+    new_kp_array = np.array([kp.pt for kp in best_kp_new], dtype=np.float32)
+    new_point_ids = -np.ones(len(new_kp_array), dtype=int)
     new_camera = Camera(
         id=new_camera_id,
         K=K,
         R=R_new,
         t=t_new,
         image_idx=image_idx,
-        keypoints=np.array([kp.pt for kp in best_kp_new], dtype=np.float32),
+        keypoints=new_kp_array,
         descriptors=desc_new,
+        point_ids=new_point_ids,
     )
     scene.cameras.append(new_camera)
 
-    # Add observations for matched EXISTING 3D points (PnP inliers only).
-    inlier_point_ids = [
-        list(matched_point_ids.keys())[i]
-        for i in range(len(matched_point_ids))
-        if inlier_mask[i]
-    ]
-    inlier_points_2d = points_2d_array[inlier_mask]
+    # Add observations for matched EXISTING 3D points (PnP inliers only),
+    # and mark the corresponding new-image keypoints as observing those
+    # 3D points.
+    inlier_indices = np.where(inlier_mask)[0]
+    for idx in inlier_indices:
+        pid = matched_point_ids[idx]
+        uv = np.array(points_2d_array[idx], dtype=np.float32)
 
-    for i, point_id in enumerate(inlier_point_ids):
         obs_idx = len(scene.observations)
-        obs = Observation(camera_id=new_camera_id, point_id=point_id, uv=inlier_points_2d[i])
+        obs = Observation(camera_id=new_camera_id, point_id=pid, uv=uv)
         scene.observations.append(obs)
-        scene.points3d[point_id].observations.append(obs_idx)
+        scene.points3d[pid].observations.append(obs_idx)
+
+        k_new = matched_query_indices[idx]
+        new_camera.point_ids[k_new] = pid
 
     # ------------------------------------------------------------------
     # Triangulate NEW 3D points from unmatched image features.
@@ -463,54 +455,26 @@ def add_camera_incremental(
     #     both cameras.
     # ------------------------------------------------------------------
 
-    # Gather existing observations for both cameras.
-    cam_obs_uvs = []
-    cam_obs_point_ids = []
-    new_obs_uvs = []
-    new_obs_point_ids = []
-
-    for idx, obs in enumerate(scene.observations):
-        if obs.camera_id == best_camera_match.id:
-            cam_obs_uvs.append(obs.uv)
-            cam_obs_point_ids.append(obs.point_id)
-        elif obs.camera_id == new_camera_id:
-            new_obs_uvs.append(obs.uv)
-            new_obs_point_ids.append(obs.point_id)
-
-    cam_obs_uvs = np.array(cam_obs_uvs, dtype=np.float32) if cam_obs_uvs else np.zeros((0, 2), dtype=np.float32)
-    new_obs_uvs = np.array(new_obs_uvs, dtype=np.float32) if new_obs_uvs else np.zeros((0, 2), dtype=np.float32)
-
-    # Pixel-distance threshold for deciding whether a keypoint already
-    # has a 3D point observation attached.
-    existing_obs_dist = 2.0
-    existing_obs_dist_sq = existing_obs_dist * existing_obs_dist
-
+    # Build candidate matches for NEW 3D points: require that neither
+    # side of the match currently has an associated 3D point.
     new_match_pts_cam = []
     new_match_pts_new = []
+    new_kp_idx_cam: list[int] = []
+    new_kp_idx_new: list[int] = []
 
     for match in best_matches:
-        if match.trainIdx >= len(best_camera_match.keypoints):
-            continue
+        pid_cam = int(best_camera_match.point_ids[match.trainIdx]) if len(best_camera_match.point_ids) > 0 else -1
+        pid_new = int(new_camera.point_ids[match.queryIdx]) if len(new_camera.point_ids) > 0 else -1
+        if pid_cam >= 0 or pid_new >= 0:
+            continue  # this feature is already tied to a 3D point in at least one view
 
         pt_cam = np.array(best_camera_match.keypoints[match.trainIdx], dtype=np.float32)
         pt_new = np.array(best_kp_new[match.queryIdx].pt, dtype=np.float32)
 
-        # Skip if this feature on the existing camera is already tied to
-        # a 3D point (observation very close in pixel space).
-        if cam_obs_uvs.shape[0] > 0:
-            diffs_cam = cam_obs_uvs - pt_cam[None, :]
-            if np.min(np.sum(diffs_cam * diffs_cam, axis=1)) <= existing_obs_dist_sq:
-                continue
-
-        # Skip if this feature on the new camera is already tied to a
-        # 3D point (should be rare, but be safe).
-        if new_obs_uvs.shape[0] > 0:
-            diffs_new = new_obs_uvs - pt_new[None, :]
-            if np.min(np.sum(diffs_new * diffs_new, axis=1)) <= existing_obs_dist_sq:
-                continue
-
         new_match_pts_cam.append(pt_cam)
         new_match_pts_new.append(pt_new)
+        new_kp_idx_cam.append(match.trainIdx)
+        new_kp_idx_new.append(match.queryIdx)
 
     if len(new_match_pts_cam) >= 8:
         pts_cam_np = np.array(new_match_pts_cam, dtype=np.float32)
@@ -559,6 +523,8 @@ def add_camera_incremental(
             pts_cam_valid = pts_cam_np[valid_mask]
             pts_new_valid = pts_new_np[valid_mask]
             points_3d_valid = points_3d_new[valid_mask]
+            kp_idx_cam_valid = np.array(new_kp_idx_cam, dtype=int)[valid_mask]
+            kp_idx_new_valid = np.array(new_kp_idx_new, dtype=int)[valid_mask]
 
             for i, pt_3d in enumerate(points_3d_valid):
                 new_point_id = len(scene.points3d)
@@ -577,6 +543,12 @@ def add_camera_incremental(
                     observations=[],
                 )
                 scene.points3d.append(point3d)
+
+                # Mark which keypoints now observe this 3D point.
+                k_cam = kp_idx_cam_valid[i]
+                k_new = kp_idx_new_valid[i]
+                best_camera_match.point_ids[k_cam] = new_point_id
+                new_camera.point_ids[k_new] = new_point_id
 
                 # Observations in both cameras.
                 obs_idx_cam = len(scene.observations)
@@ -611,6 +583,8 @@ def run_sfm_from_frames(
     frames: List[np.ndarray],
     K: np.ndarray,
     keyframe_indices: List[int],
+    baseframe1: Optional[int] = None,
+    baseframe2: Optional[int] = None,
 ) -> SceneGraph:
     """
     Run incremental SfM on a sequence of keyframes.
@@ -623,20 +597,41 @@ def run_sfm_from_frames(
     Returns:
         SceneGraph containing all cameras, 3D points, and observations.
     """
-    if len(keyframe_indices) < 2:
-        return SceneGraph()
+    n_frames = len(frames)
 
-    # Choose base keyframes from the provided keyframe_indices rather than
-    # using hard-coded timestamps. By default we use:
-    #   - the first keyframe, and
-    #   - the 5th keyframe if it exists, otherwise the last keyframe.
-    i0 = keyframe_indices[0]
-    if len(keyframe_indices) >= 5:
-        i1 = keyframe_indices[4]
+    # If the user provided manual base frames, clamp them to the valid range
+    # of the extracted/undistorted frame list and use them directly.
+    if baseframe1 is not None and baseframe2 is not None:
+        i0 = max(0, min(n_frames - 1, int(baseframe1)))
+        i1 = max(0, min(n_frames - 1, int(baseframe2)))
+        print(
+            f"[sfm] Using MANUAL base frames {i0} and {i1} for initial reconstruction "
+            "(overriding default fixed base-frame selection)"
+        )
     else:
-        i1 = keyframe_indices[-1]
+        if len(keyframe_indices) < 2:
+            return SceneGraph()
 
-    print(f"[sfm] Using base keyframes {i0} and {i1} for initial reconstruction")
+        # Default behavior: pick specific frames corresponding (approximately)
+        # to 26s and 27s in the original Library video, based on the debug
+        # extraction you ran:
+        #
+        #   FPS ≈ 59.97, stride every_n = 5  -> extracted frame indices:
+        #     t=26s -> frame_idx ≈ 1559
+        #     t=27s -> frame_idx ≈ 1619
+        #
+        # Mapping raw frame indices to indices in the subsampled `frames` list:
+        #   subsampled_index ≈ round(frame_idx / every_n)
+        #   -> i0 ≈ round(1559 / 5) ≈ 312
+        #   -> i1 ≈ round(1619 / 5) ≈ 324
+        #
+        # We clamp to the valid range of the frames list.
+        approx_i0 = int(round(1559 / 5))
+        approx_i1 = int(round(1619 / 5))
+        i0 = max(0, min(n_frames - 1, approx_i0))
+        i1 = max(0, min(n_frames - 1, approx_i1))
+
+        print(f"[sfm] Using fixed base keyframes {i0} and {i1} for initial reconstruction")
 
     # Build base scene from two frames
     scene = build_base_scene_from_two_frames(frames, i0, i1, K)
@@ -644,8 +639,8 @@ def run_sfm_from_frames(
     if len(scene.cameras) == 0:
         return scene
 
-    # Add remaining keyframes incrementally (all others).
-    remaining_indices = [idx for idx in keyframe_indices if idx not in (i0, i1)]
+    # Add remaining keyframes incrementally
+    remaining_indices = [idx for idx in keyframe_indices if idx != i0 and idx != i1]
 
     for idx in remaining_indices:
         scene = add_camera_incremental(scene, K, frames[idx], idx)

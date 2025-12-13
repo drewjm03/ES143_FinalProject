@@ -4,7 +4,7 @@ Bundle adjustment for refining camera poses and 3D point positions.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Tuple
 
 import cv2
 import numpy as np
@@ -13,10 +13,7 @@ from scipy.optimize import least_squares
 from sfm_app.sfm_inc.data_structures import SceneGraph
 
 
-def pack_parameters(
-    scene: SceneGraph,
-    fixed_camera_ids: Optional[Iterable[int]] = None,
-) -> Tuple[np.ndarray, Dict]:
+def pack_parameters(scene: SceneGraph) -> Tuple[np.ndarray, Dict]:
     """
     Pack all camera extrinsics and 3D point positions into a 1D parameter vector.
 
@@ -33,21 +30,14 @@ def pack_parameters(
             - meta["point_params_start"]: Starting index for point parameters
     """
     param_list = []
-    fixed_ids = set(fixed_camera_ids) if fixed_camera_ids is not None else set()
     meta = {
         "camera_slice": {},
         "point_slice": {},
     }
 
-    # Pack camera parameters (6 per camera: rvec (3) + t (3)), skipping
-    # any cameras whose poses are held fixed (for gauge fixing).
+    # Pack camera parameters (6 per camera: rvec (3) + t (3))
     camera_params_start = 0
     for cam in scene.cameras:
-        if cam.id in fixed_ids:
-            # Mark this camera as fixed by storing a None slice; no
-            # parameters are added to the vector for this camera.
-            meta["camera_slice"][cam.id] = None
-            continue
         # Convert R to rvec using Rodrigues
         rvec, _ = cv2.Rodrigues(cam.R)
         rvec = rvec.flatten()
@@ -92,12 +82,9 @@ def unpack_parameters(
         scene: SceneGraph to update in-place.
         meta: Dictionary with slice information from pack_parameters.
     """
-    # Unpack camera parameters (skip any cameras that were held fixed)
+    # Unpack camera parameters
     for cam in scene.cameras:
         cam_slice = meta["camera_slice"][cam.id]
-        if cam_slice is None:
-            continue  # fixed camera: do not overwrite its pose
-
         cam_params = params[cam_slice]
 
         rvec = cam_params[:3]
@@ -164,14 +151,6 @@ def reprojection_residuals(
         1D array of residuals (2 per observation: [du, dv]).
     """
     residuals = []
-    # Precompute fixed camera extrinsics (those with no parameter slice).
-    camera_slices = meta["camera_slice"]
-    fixed_cam_rt: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
-    for cam in scene.cameras:
-        sl = camera_slices.get(cam.id)
-        if sl is None:
-            rvec, _ = cv2.Rodrigues(cam.R)
-            fixed_cam_rt[cam.id] = (rvec.flatten(), cam.t.flatten())
 
     for obs in scene.observations:
         # Get camera and point indices
@@ -179,14 +158,10 @@ def reprojection_residuals(
         point_id = obs.point_id
 
         # Extract camera parameters
-        cam_slice = camera_slices[camera_id]
-        if cam_slice is None:
-            # This camera is held fixed: use its current R,t directly.
-            rvec, tvec = fixed_cam_rt[camera_id]
-        else:
-            cam_params = params[cam_slice]
-            rvec = cam_params[:3]
-            tvec = cam_params[3:6]
+        cam_slice = meta["camera_slice"][camera_id]
+        cam_params = params[cam_slice]
+        rvec = cam_params[:3]
+        tvec = cam_params[3:6]
 
         # Extract point parameters
         pt_slice = meta["point_slice"][point_id]
@@ -207,7 +182,7 @@ def reprojection_residuals(
 def run_bundle_adjustment(
     scene: SceneGraph,
     K: np.ndarray,
-    max_nfev: int = 15,
+    max_nfev: int = 10,
 ) -> SceneGraph:
     """
     Run bundle adjustment to refine camera poses and 3D point positions.
@@ -224,44 +199,14 @@ def run_bundle_adjustment(
         return scene
 
     # Optionally subsample points to keep BA lightweight.
-    # We target a *smaller* subset of long tracks to reduce runtime:
-    #  - only consider points observed in at least `min_track_len` cameras
-    #  - cap at `max_points_for_ba` points, sampled with probability
-    #    proportional to track length.
-    max_points_for_ba = 500
-    min_track_len = 4
+    # We target roughly 200–300 points; use at most 250 randomly selected points.
+    max_points_for_ba = 250
     n_total_points = len(scene.points3d)
 
-    # Identify "long track" points first.
-    track_lengths = np.array(
-        [len(pt.observations) for pt in scene.points3d],
-        dtype=np.int32,
-    )
-    eligible_indices = np.where(track_lengths >= min_track_len)[0]
-
-    if eligible_indices.size == 0:
-        # Fall back to using all points if nothing meets the track-length threshold.
-        eligible_indices = np.arange(n_total_points)
-
-    n_eligible = eligible_indices.size
-
-    if n_eligible > max_points_for_ba:
-        tl_eligible = track_lengths[eligible_indices].astype(np.float64)
-        tl_eligible[tl_eligible <= 0] = 1.0
-        weights = tl_eligible / np.sum(tl_eligible)
-
+    if n_total_points > max_points_for_ba:
+        # Randomly select a subset of 3D points for BA.
         rng = np.random.default_rng()
-        chosen_local = rng.choice(
-            n_eligible,
-            size=max_points_for_ba,
-            replace=False,
-            p=weights,
-        )
-        selected_indices = eligible_indices[chosen_local]
-    else:
-        selected_indices = eligible_indices
-
-    if selected_indices.size < n_total_points:
+        selected_indices = rng.choice(n_total_points, size=max_points_for_ba, replace=False)
         selected_ids = {scene.points3d[i].id for i in selected_indices}
 
         # Build a lightweight SceneGraph "view" that shares Camera/Point3D
@@ -275,34 +220,22 @@ def run_bundle_adjustment(
 
         print(
             f"[ba] Subsampling {n_total_points} points down to "
-            f"{len(scene_for_ba.points3d)} for bundle adjustment "
-            f"(track-length-weighted, min_track_len={min_track_len})"
+            f"{len(scene_for_ba.points3d)} for bundle adjustment"
         )
     else:
         scene_for_ba = scene
 
-    # Pack parameters, holding camera 0 fixed to remove gauge freedom.
-    fixed_cam_ids = {0} if any(cam.id == 0 for cam in scene_for_ba.cameras) else set()
-    params, meta = pack_parameters(scene_for_ba, fixed_camera_ids=fixed_cam_ids)
+    # Pack parameters
+    params, meta = pack_parameters(scene_for_ba)
 
     n_cams = len(scene_for_ba.cameras)
     n_pts = len(scene_for_ba.points3d)
     n_obs = len(scene_for_ba.observations)
     n_params = params.size
-
-    # Compute initial residual statistics.
-    res0 = reprojection_residuals(params, scene_for_ba, meta, K)
-    rms0 = float(np.sqrt(np.mean(res0 ** 2))) if res0.size > 0 else 0.0
-    max0 = float(np.max(np.abs(res0))) if res0.size > 0 else 0.0
-
     print(
         f"[ba] Starting bundle adjustment with {n_cams} cameras, "
         f"{n_pts} points, {n_obs} observations, {n_params} parameters, "
         f"max_nfev={max_nfev}"
-    )
-    print(
-        f"[ba] Initial reprojection error: RMS={rms0:.2f} px, "
-        f"max={max0:.2f} px over {res0.size // 2} observations"
     )
 
     # Run optimization with limited iterations (to keep runtime manageable)
@@ -316,21 +249,12 @@ def run_bundle_adjustment(
         max_nfev=max_nfev,
     )
 
-    # Compute final residual statistics.
-    res1 = reprojection_residuals(result.x, scene_for_ba, meta, K)
-    rms1 = float(np.sqrt(np.mean(res1 ** 2))) if res1.size > 0 else 0.0
-    max1 = float(np.max(np.abs(res1))) if res1.size > 0 else 0.0
-
     print(
         f"[ba] Done. Status={result.status}, nfev={result.nfev}, "
-        f"cost={result.cost:.3e}"
-    )
-    print(
-        f"[ba] Final reprojection error: RMS={rms1:.2f} px, "
-        f"max={max1:.2f} px (ΔRMS={rms1 - rms0:+.2f} px)"
+        f"initial_cost={result.cost:.3e}"
     )
 
-    # Unpack optimized parameters back into the (subsampled) scene.
+    # Unpack optimized parameters
     unpack_parameters(result.x, scene_for_ba, meta)
 
     return scene

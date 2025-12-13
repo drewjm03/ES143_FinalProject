@@ -14,7 +14,7 @@ from sfm_app.geometry.essential import compute_essential_matrix, extract_RT_esse
 from sfm_app.geometry.fundamental import constrain_F, fundamental_matrix_ransac
 from sfm_app.geometry.pnp import estimate_camera_pose_pnp
 from sfm_app.geometry.triangulation import triangulate_matched_key_pts_to_3D_pts
-from sfm_app.sfm.data_structures import Camera, Observation, Point3D, SceneGraph
+from sfm_app.sfm_inc.data_structures import Camera, Observation, Point3D, SceneGraph
 
 
 def build_base_scene_from_two_frames(
@@ -631,30 +631,8 @@ def run_sfm_from_frames(
     #   - the first keyframe, and
     #   - the 5th keyframe if it exists, otherwise the last keyframe.
     i0 = keyframe_indices[0]
-
-    # ------------------------------------------------------------
-    # Helper to count 3D points in a SceneGraph robustly
-    # ------------------------------------------------------------
-    def count_points(scene: SceneGraph) -> int:
-        if hasattr(scene, "points3d") and scene.points3d is not None:
-            return len(scene.points3d)
-        if hasattr(scene, "points") and scene.points is not None:
-            return len(scene.points)
-        return 0
-
-    # ------------------------------------------------------------
-    # Candidate second keyframe: fixed offset from the first.
-    #
-    # We choose the base pair to be:
-    #   - the earliest keyframe (i0), and
-    #   - the keyframe that is 5 positions later in the keyframe list,
-    #     or the last keyframe if there are fewer than 6 total.
-    #
-    # This approximates "first frame and first + 5 frames" under the
-    # keyframe subsampling used by the CLI.
-    # ------------------------------------------------------------
-    if len(keyframe_indices) > 5:
-        candidate_indices = [keyframe_indices[5]]
+    if len(keyframe_indices) >= 5:
+        i1 = keyframe_indices[4]
     else:
         i1 = keyframe_indices[-1]
 
